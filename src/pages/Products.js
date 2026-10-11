@@ -1,315 +1,326 @@
-import React, { useEffect, useState } from "react";
-import api from "../Api";
-import { Button, TextField, Dialog, DialogActions, DialogContent, DialogTitle } from "@mui/material";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import api, { imageSrc } from "../Api";
+import {
+  Alert, ConfirmDialog, EmptyState, Icon, Modal, ProductFormModal, QtyStepper,
+  errorMessage, firstName, fmtPrice, useToast,
+} from "../components/ui";
 
-const Products = ({ user, cart, onAddToCart, onGoToCart, onGoToDashboard, onGoToOrders, onGoToAdmin, onLogout }) => {
-  const [products, setProducts]     = useState([]);
+const SORTS = [
+  { id: "featured", label: "Featured" },
+  { id: "newest", label: "Newest" },
+  { id: "price-asc", label: "Price: low to high" },
+  { id: "price-desc", label: "Price: high to low" },
+  { id: "name", label: "Name: A–Z" },
+];
+
+const sortProducts = (list, sort) => {
+  const out = [...list];
+  if (sort === "price-asc") out.sort((a, b) => a.price - b.price);
+  else if (sort === "price-desc") out.sort((a, b) => b.price - a.price);
+  else if (sort === "name") out.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  else if (sort === "newest") out.sort((a, b) => b.id - a.id);
+  return out;
+};
+
+const Products = ({ user, cart, onAddToCart, onGoToCart }) => {
+  const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
-  const [search, setSearch]         = useState("");
-  const [selCategory, setSelCategory] = useState(null);
-  const [priceRange, setPriceRange] = useState({ min: "", max: "" });
-  const [open, setOpen]             = useState(false);
-  const [currentProduct, setCurrentProduct] = useState({ name: "", description: "", price: "", artisanName: "", imageUrl: "", categoryId: "" });
-  const [editMode, setEditMode]     = useState(false);
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [hoveredId, setHoveredId]   = useState(null);
-  const [deleteConfirm, setDeleteConfirm] = useState(null);
-  const [addedId, setAddedId]       = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
 
-  const isArtisanOrAdmin = user?.role === "ARTISAN" || user?.role === "ADMIN";
-  const cartCount = cart.reduce((sum, i) => sum + i.quantity, 0);
+  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
+  const [selCategory, setSelCategory] = useState(null);
+  const [price, setPrice] = useState({ min: "", max: "" });
+  const [sort, setSort] = useState("featured");
+
+  const [editing, setEditing] = useState(null);   // {} = new product, product = edit
+  const [deleting, setDeleting] = useState(null);
+  const [viewing, setViewing] = useState(null);
+  const [viewQty, setViewQty] = useState(1);
+  const [toast, showToast] = useToast();
+  const resultsRef = useRef(null);
+
+  const canAdd = user.role === "ARTISAN" || user.role === "ADMIN";
+  const canManage = (p) =>
+    user.role === "ADMIN" || (user.role === "ARTISAN" && p.artisanName?.toLowerCase() === user.name?.toLowerCase());
 
   useEffect(() => {
-    fetchProducts();
-    api.get("/api/categories").then(res => setCategories(res.data)).catch(console.error);
+    api.get("/api/categories").then((res) => setCategories(res.data)).catch(() => {});
   }, []);
 
-  const fetchProducts = () => {
-    // Use filter endpoint if any filter is active
+  // Debounce typing so we don't hit the API on every keystroke
+  useEffect(() => {
+    const t = setTimeout(() => setQuery(search.trim()), 250);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const fetchProducts = useCallback(() => {
     const params = new URLSearchParams();
-    if (search)       params.append("keyword", search);
-    if (selCategory)  params.append("categoryId", selCategory);
-    if (priceRange.min) params.append("minPrice", priceRange.min);
-    if (priceRange.max) params.append("maxPrice", priceRange.max);
-
+    if (query) params.append("keyword", query);
+    if (selCategory) params.append("categoryId", selCategory);
+    if (price.min) params.append("minPrice", price.min);
+    if (price.max) params.append("maxPrice", price.max);
     const url = params.toString() ? `/api/products/filter?${params}` : "/api/products";
-    api.get(url).then(res => setProducts(res.data)).catch(console.error);
-  };
 
-  // Re-fetch whenever filters change
-  useEffect(() => { fetchProducts(); }, [search, selCategory, priceRange.min, priceRange.max]);
+    setLoading(true);
+    return api.get(url)
+      .then((res) => { setProducts(res.data); setLoadError(""); })
+      .catch((err) => setLoadError(errorMessage(err, "Couldn't load products.")))
+      .finally(() => setLoading(false));
+  }, [query, selCategory, price.min, price.max]);
+
+  useEffect(() => { fetchProducts(); }, [fetchProducts]);
+
+  const catById = useMemo(() => Object.fromEntries(categories.map((c) => [c.id, c])), [categories]);
+  const sorted = useMemo(() => sortProducts(products, sort), [products, sort]);
+  const hasFilter = Boolean(search || selCategory || price.min || price.max);
+  const activeCategory = selCategory ? catById[selCategory] : null;
 
   const clearFilters = () => {
-    setSearch(""); setSelCategory(null); setPriceRange({ min: "", max: "" });
+    setSearch(""); setSelCategory(null); setPrice({ min: "", max: "" });
   };
-  const hasFilter = search || selCategory || priceRange.min || priceRange.max;
 
-  const handleSave = async () => {
-    let imageName = currentProduct.imageUrl || "";
-    if (selectedFile) {
-      const formData = new FormData();
-      formData.append("file", selectedFile);
-      const res = await api.post("/api/products/upload", formData);
-      imageName = res.data;
+  const pickCategory = (id) => {
+    setSelCategory(selCategory === id ? null : id);
+    resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const addToBag = (p, qty = 1) => {
+    onAddToCart(p, qty);
+    showToast(`Added “${p.name}” to your bag`, { action: { label: "View bag", onClick: onGoToCart } });
+  };
+
+  const openQuickView = (p) => { setViewing(p); setViewQty(1); };
+
+  const handleDelete = async () => {
+    try {
+      await api.delete(`/api/products/${deleting.id}`);
+      showToast("Product removed");
+      setDeleting(null);
+      fetchProducts();
+    } catch (err) {
+      showToast(errorMessage(err, "Couldn't delete the product."), { error: true });
+      setDeleting(null);
     }
-    const payload = { ...currentProduct, imageUrl: imageName, artisanName: user.name };
-    if (editMode) { await api.put(`/api/products/${currentProduct.id}`, payload); }
-    else          { await api.post("/api/products", payload); }
-    setOpen(false);
-    setCurrentProduct({ name: "", description: "", price: "", artisanName: "", imageUrl: "", categoryId: "" });
-    setEditMode(false); setSelectedFile(null);
-    fetchProducts();
   };
 
-  const handleDelete = async (id) => {
-    await api.delete(`/api/products/${id}`);
-    setDeleteConfirm(null); fetchProducts();
-  };
-
-  const handleOpen = (product = null) => {
-    if (product) { setCurrentProduct(product); setEditMode(true); }
-    else { setCurrentProduct({ name: "", description: "", price: "", artisanName: user.name, imageUrl: "", categoryId: "" }); setEditMode(false); }
-    setSelectedFile(null); setOpen(true);
-  };
-
-  const handleAddToCart = (p) => {
-    onAddToCart(p); setAddedId(p.id);
-    setTimeout(() => setAddedId(null), 1200);
-  };
-
-  const getCategoryName = (id) => categories.find(c => c.id === id)?.name || "";
+  const inBag = (id) => cart.find((i) => i.id === id)?.quantity || 0;
 
   return (
-    <div style={st.page}>
-      {/* Navbar */}
-      <nav style={st.navbar}>
-        <div style={st.navBrand}>
-          <span style={st.navLogoMark}>✦</span>
-          <span style={st.navTitle}>Artisan Handcraft</span>
-          <span style={st.navSubtitle}>Marketplace</span>
-        </div>
-        <div style={st.navRight}>
-          {user && <span style={st.navUser}>Welcome, {user.name}</span>}
-          <button style={st.cartBtn} onClick={onGoToCart}>
-            🛍 Cart {cartCount > 0 && <span style={st.cartBadge}>{cartCount}</span>}
-          </button>
-          <button style={st.navBtn2} onClick={onGoToOrders}>My orders</button>
-          {user?.role === "ARTISAN" && <button style={st.navBtn2} onClick={onGoToDashboard}>Dashboard</button>}
-          {user?.role === "ADMIN"   && <button style={st.navBtn2} onClick={onGoToAdmin}>Admin</button>}
-          <button style={st.logoutBtn} onClick={onLogout}>Sign out</button>
-        </div>
-      </nav>
-
+    <>
       {/* Hero */}
-      <div style={st.heroStrip}>
-        <div style={st.heroInner}>
-          <h1 style={st.heroTitle}>Handmade with heart, <em>crafted for you</em></h1>
-          <p style={st.heroSub}>Discover unique artisan goods from skilled makers across India</p>
-        </div>
-      </div>
+      <section className="hero">
+        <div className="container hero-inner">
+          <div>
+            <span className="eyebrow">Namaste, {firstName(user.name)}</span>
+            <h1>Objects made slowly, <em>by hand,</em> to be kept for a lifetime.</h1>
+            <p className="hero-lead">
+              Discover pottery, handloom textiles, jewellery and folk art from skilled makers across India —
+              every purchase goes straight to the artisan.
+            </p>
+            <div className="hero-actions">
+              <button className="btn btn-primary btn-lg"
+                onClick={() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+                Explore the collection <Icon name="arrowRight" size={17} />
+              </button>
+              {canAdd && (
+                <button className="btn btn-secondary btn-lg" onClick={() => setEditing({})}>
+                  <Icon name="plus" size={17} /> List a product
+                </button>
+              )}
+            </div>
+            <div className="hero-points">
+              <span><Icon name="hand" size={16} /> 100% handmade</span>
+              <span><Icon name="truck" size={16} /> Free shipping over ₹999</span>
+              <span><Icon name="shield" size={16} /> Secure checkout</span>
+            </div>
+          </div>
 
-      {/* Category pills */}
-      {categories.length > 0 && (
-        <div style={st.categoryBar}>
-          <button
-            style={selCategory === null ? { ...st.catPill, ...st.catPillActive } : st.catPill}
-            onClick={() => setSelCategory(null)}>
-            All
-          </button>
-          {categories.map(c => (
-            <button key={c.id}
-              style={selCategory === c.id ? { ...st.catPill, ...st.catPillActive } : st.catPill}
-              onClick={() => setSelCategory(selCategory === c.id ? null : c.id)}>
-              {c.icon && <span style={{ marginRight: "5px" }}>{c.icon}</span>}{c.name}
-            </button>
-          ))}
+          {categories.length > 0 && (
+            <div className="craft-tiles" aria-label="Shop by craft">
+              {categories.slice(0, 6).map((c) => (
+                <button key={c.id} className={"craft-tile" + (selCategory === c.id ? " active" : "")}
+                  onClick={() => pickCategory(c.id)} aria-pressed={selCategory === c.id}>
+                  <span className="craft-tile-icon">{c.icon || "✦"}</span>
+                  <span>
+                    <div className="craft-tile-name">{c.name}</div>
+                    {c.description && <div className="craft-tile-sub">{c.description}</div>}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-      )}
+      </section>
 
-      {/* Toolbar */}
-      <div style={st.toolbar}>
-        <div style={st.searchWrap}>
-          <span style={st.searchIcon}>⌕</span>
-          <input placeholder="Search products..." value={search} onChange={e => setSearch(e.target.value)} style={st.searchInput}
-            onFocus={e => Object.assign(e.target.style, { borderColor: "#a0622a" })}
-            onBlur={e => Object.assign(e.target.style, { borderColor: "#d9c9b0" })} />
-        </div>
-
-        {/* Price filter */}
-        <div style={st.priceFilter}>
-          <input placeholder="Min ₹" value={priceRange.min} onChange={e => setPriceRange({ ...priceRange, min: e.target.value })} style={st.priceInput} type="number" />
-          <span style={st.priceSeperator}>—</span>
-          <input placeholder="Max ₹" value={priceRange.max} onChange={e => setPriceRange({ ...priceRange, max: e.target.value })} style={st.priceInput} type="number" />
-        </div>
-
-        <div style={st.toolbarRight}>
-          {hasFilter && <button style={st.clearBtn} onClick={clearFilters}>✕ Clear</button>}
-          <span style={st.countBadge}>{products.length} items</span>
-          {isArtisanOrAdmin && (
-            <button style={st.addBtn} onClick={() => handleOpen()}
-              onMouseEnter={e => Object.assign(e.target.style, { background: "#a0622a" })}
-              onMouseLeave={e => Object.assign(e.target.style, { background: "#7c4a1e" })}>
-              + Add Product
-            </button>
+      {/* Filters */}
+      <div className="filter-bar">
+        <div className="container">
+          <div className="filter-row">
+            <div className="search-box input-icon">
+              <Icon name="search" />
+              <input className="input" type="search" placeholder="Search vases, scarves, jhumkas…"
+                value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search products" />
+            </div>
+            <div className="price-range">
+              <input className="input" type="number" min="0" placeholder="Min ₹" aria-label="Minimum price"
+                value={price.min} onChange={(e) => setPrice({ ...price, min: e.target.value })} />
+              <span>–</span>
+              <input className="input" type="number" min="0" placeholder="Max ₹" aria-label="Maximum price"
+                value={price.max} onChange={(e) => setPrice({ ...price, max: e.target.value })} />
+            </div>
+            <select className="input sort-select" value={sort} onChange={(e) => setSort(e.target.value)} aria-label="Sort by">
+              {SORTS.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+            </select>
+          </div>
+          {categories.length > 0 && (
+            <div className="filter-row">
+              <div className="chips">
+                <button className={"chip" + (!selCategory ? " active" : "")} onClick={() => setSelCategory(null)}>All crafts</button>
+                {categories.map((c) => (
+                  <button key={c.id} className={"chip" + (selCategory === c.id ? " active" : "")}
+                    onClick={() => setSelCategory(selCategory === c.id ? null : c.id)}>
+                    <span>{c.icon}</span>{c.name}
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
         </div>
       </div>
 
-      {/* Grid */}
-      <div style={st.grid}>
-        {products.length === 0 && (
-          <div style={st.emptyState}>
-            <p style={{ fontSize: "48px", marginBottom: "12px" }}>🏺</p>
-            <p style={{ color: "#8a6a52", fontSize: "16px", fontFamily: "'Trebuchet MS', sans-serif" }}>
-              {hasFilter ? "No products match your filters." : "No products yet."}
-            </p>
-            {hasFilter && <button style={st.addBtn} onClick={clearFilters}>Clear filters</button>}
+      {/* Results */}
+      <section className="container page" style={{ paddingTop: 0 }} ref={resultsRef}>
+        <div className="results-head" style={{ scrollMarginTop: 160 }}>
+          <h2>
+            {activeCategory ? activeCategory.name : query ? `Results for “${query}”` : "The collection"}
+            {!loading && <span className="results-count">{sorted.length} {sorted.length === 1 ? "piece" : "pieces"}</span>}
+          </h2>
+          <div style={{ display: "flex", gap: 8 }}>
+            {hasFilter && (
+              <button className="btn btn-ghost btn-sm" onClick={clearFilters}><Icon name="x" size={15} /> Clear filters</button>
+            )}
+            {canAdd && (
+              <button className="btn btn-dark btn-sm" onClick={() => setEditing({})}><Icon name="plus" size={15} /> Add product</button>
+            )}
+          </div>
+        </div>
+
+        {loadError && (
+          <Alert>
+            {loadError}{" "}
+            <button className="link" onClick={fetchProducts}>Try again</button>
+          </Alert>
+        )}
+
+        {loading && products.length === 0 ? (
+          <div className="product-grid">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i}>
+                <div className="skeleton skeleton-media" />
+                <div className="skeleton skeleton-line" style={{ width: "40%" }} />
+                <div className="skeleton skeleton-line" style={{ width: "80%" }} />
+                <div className="skeleton skeleton-line" style={{ width: "30%" }} />
+              </div>
+            ))}
+          </div>
+        ) : sorted.length === 0 && !loadError ? (
+          <EmptyState
+            icon="vase"
+            title={hasFilter ? "Nothing matches those filters" : "No products yet"}
+            text={hasFilter ? "Try a different search, category or price range." : canAdd ? "Be the first to list a handmade piece." : "Check back soon — artisans are adding new pieces."}
+            action={hasFilter
+              ? <button className="btn btn-secondary" onClick={clearFilters}>Clear filters</button>
+              : canAdd && <button className="btn btn-primary" onClick={() => setEditing({})}><Icon name="plus" size={16} /> Add product</button>}
+          />
+        ) : (
+          <div className={"product-grid" + (loading ? " is-refreshing" : "")}>
+            {sorted.map((p, i) => {
+              const cat = catById[p.categoryId];
+              const qty = inBag(p.id);
+              return (
+                <article key={p.id} className="product-card" style={{ animationDelay: `${Math.min(i, 12) * 30}ms` }}>
+                  <button className="product-media" onClick={() => openQuickView(p)} aria-label={`Quick view: ${p.name}`}>
+                    <img src={imageSrc(p.imageUrl, cat?.icon)} alt="" loading="lazy" />
+                    {cat && <span className="product-tag">{cat.icon} {cat.name}</span>}
+                    <span className="product-quick"><Icon name="eye" size={16} /> Quick view</span>
+                  </button>
+                  {canManage(p) && (
+                    <div className="product-admin">
+                      <button className="icon-btn icon-btn-glass" onClick={() => setEditing(p)} aria-label={`Edit ${p.name}`}><Icon name="edit" size={16} /></button>
+                      <button className="icon-btn icon-btn-glass icon-btn-danger" onClick={() => setDeleting(p)} aria-label={`Delete ${p.name}`}><Icon name="trash" size={16} /></button>
+                    </div>
+                  )}
+                  <div className="product-body">
+                    <div className="product-artisan">{p.artisanName}</div>
+                    <button className="product-name" onClick={() => openQuickView(p)}>{p.name}</button>
+                    <p className="product-desc">{p.description}</p>
+                    <div className="product-footer">
+                      <span className="price">{fmtPrice(p.price)}</span>
+                      <button className={"btn btn-sm " + (qty ? "btn-secondary" : "btn-primary")} onClick={() => addToBag(p)}>
+                        {qty ? <><Icon name="check" size={15} /> In bag · {qty}</> : <><Icon name="bag" size={15} /> Add to bag</>}
+                      </button>
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
           </div>
         )}
-        {products.map(p => (
-          <div key={p.id}
-            style={hoveredId === p.id ? { ...st.card, ...st.cardHover } : st.card}
-            onMouseEnter={() => setHoveredId(p.id)} onMouseLeave={() => setHoveredId(null)}>
-            <div style={st.imgWrap}>
-              <img src={p.imageUrl ? `http://localhost:8080/uploads/${p.imageUrl}` : "https://via.placeholder.com/400x300/f5ead8/a0622a?text=Handcraft"} alt={p.name} style={st.img} />
-              {p.categoryId && <span style={st.catTag}>{getCategoryName(p.categoryId)}</span>}
-            </div>
-            <div style={st.cardBody}>
-              <div style={st.artisanBadge}>✦ {p.artisanName}</div>
-              <h3 style={st.productName}>{p.name}</h3>
-              <p style={st.productDesc}>{p.description}</p>
-              <div style={st.cardFooter}>
-                <span style={st.price}>₹{Number(p.price).toLocaleString("en-IN")}</span>
-                <div style={st.cardActions}>
-                  <button
-                    style={addedId === p.id ? { ...st.cartAddBtn, background: "#2e7d32" } : st.cartAddBtn}
-                    onClick={() => handleAddToCart(p)}>
-                    {addedId === p.id ? "Added!" : "+ Cart"}
+      </section>
+
+      {/* Quick view */}
+      <Modal open={Boolean(viewing)} onClose={() => setViewing(null)} size="lg">
+        {viewing && (() => {
+          const cat = catById[viewing.categoryId];
+          return (
+            <div className="quickview">
+              <div className="quickview-media"><img src={imageSrc(viewing.imageUrl, cat?.icon)} alt={viewing.name} /></div>
+              <div className="quickview-info">
+                {cat && <span className="eyebrow">{cat.name}</span>}
+                <h2>{viewing.name}</h2>
+                <div className="muted">Handmade by <strong style={{ color: "var(--ink-2)" }}>{viewing.artisanName}</strong></div>
+                <div className="price-lg" style={{ marginTop: 16 }}>{fmtPrice(viewing.price)}</div>
+                <p className="quickview-desc">{viewing.description || "A one-of-a-kind handmade piece."}</p>
+                <div className="quickview-buy">
+                  <QtyStepper value={viewQty} onChange={(v) => setViewQty(Math.max(1, v))} />
+                  <button className="btn btn-primary btn-lg" style={{ flex: 1 }}
+                    onClick={() => { addToBag(viewing, viewQty); setViewing(null); }}>
+                    <Icon name="bag" size={17} /> Add to bag · {fmtPrice(viewing.price * viewQty)}
                   </button>
-                  {isArtisanOrAdmin && (
-                    <>
-                      <button style={st.editBtn} onClick={() => handleOpen(p)}>Edit</button>
-                      <button style={st.deleteBtn} onClick={() => setDeleteConfirm(p.id)}>Delete</button>
-                    </>
-                  )}
+                </div>
+                <div className="perks">
+                  <div><Icon name="hand" size={17} /> Handcrafted — slight variations make each piece unique</div>
+                  <div><Icon name="truck" size={17} /> Ships in 2–3 days · free over ₹999</div>
+                  <div><Icon name="heart" size={17} /> Your purchase supports the artisan directly</div>
                 </div>
               </div>
             </div>
-          </div>
-        ))}
-      </div>
+          );
+        })()}
+      </Modal>
 
-      {/* Delete confirm */}
-      <Dialog open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)}
-        PaperProps={{ style: { borderRadius: "16px", fontFamily: "'Georgia', serif", padding: "8px" } }}>
-        <DialogTitle style={{ fontFamily: "'Georgia', serif", color: "#2c1a0e" }}>Delete product?</DialogTitle>
-        <DialogContent><p style={{ fontFamily: "'Trebuchet MS', sans-serif", fontSize: "14px", color: "#6b4c35" }}>This cannot be undone.</p></DialogContent>
-        <DialogActions style={{ padding: "16px" }}>
-          <Button onClick={() => setDeleteConfirm(null)} style={{ fontFamily: "'Trebuchet MS', sans-serif", color: "#6b4c35", textTransform: "none" }}>Cancel</Button>
-          <Button onClick={() => handleDelete(deleteConfirm)} variant="contained" style={{ background: "#c0392b", fontFamily: "'Trebuchet MS', sans-serif", textTransform: "none", borderRadius: "8px" }}>Delete</Button>
-        </DialogActions>
-      </Dialog>
+      <ProductFormModal
+        open={Boolean(editing)}
+        product={editing}
+        categories={categories}
+        user={user}
+        onClose={() => setEditing(null)}
+        onSaved={(msg) => { showToast(msg); fetchProducts(); }}
+      />
 
-      {/* Add/Edit dialog */}
-      <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="sm"
-        PaperProps={{ style: { borderRadius: "16px", fontFamily: "'Georgia', serif" } }}>
-        <DialogTitle style={{ fontFamily: "'Georgia', serif", fontSize: "22px", color: "#2c1a0e", paddingBottom: "4px" }}>
-          {editMode ? "Edit product" : "Add new product"}
-        </DialogTitle>
-        <DialogContent style={{ paddingTop: "16px" }}>
-          {[
-            { label: "Product name", key: "name", placeholder: "e.g. Handwoven Silk Scarf" },
-            { label: "Description", key: "description", placeholder: "Describe this handcraft...", multiline: true },
-            { label: "Price (₹)", key: "price", placeholder: "e.g. 1499", type: "number" },
-            { label: "Image URL (optional)", key: "imageUrl", placeholder: "https://..." },
-          ].map(field => (
-            <TextField key={field.key} label={field.label} fullWidth margin="dense"
-              type={field.type || "text"} multiline={field.multiline} rows={field.multiline ? 3 : 1}
-              placeholder={field.placeholder} value={currentProduct[field.key] || ""}
-              onChange={e => setCurrentProduct({ ...currentProduct, [field.key]: e.target.value })}
-              sx={{ mb: 1, "& .MuiOutlinedInput-root": { borderRadius: "10px", fontFamily: "'Georgia', serif",
-                "& fieldset": { borderColor: "#d9c9b0" }, "&:hover fieldset": { borderColor: "#a0622a" },
-                "&.Mui-focused fieldset": { borderColor: "#7c4a1e" } },
-                "& .MuiInputLabel-root.Mui-focused": { color: "#7c4a1e" } }} />
-          ))}
+      <ConfirmDialog
+        open={Boolean(deleting)}
+        title="Delete this product?"
+        message={deleting ? `“${deleting.name}” will be removed from the marketplace. This can't be undone.` : ""}
+        onConfirm={handleDelete}
+        onCancel={() => setDeleting(null)}
+      />
 
-          {/* Category selector */}
-          <div style={{ marginTop: "8px", marginBottom: "12px" }}>
-            <label style={{ display: "block", fontSize: "12px", fontFamily: "'Trebuchet MS', sans-serif", letterSpacing: "1px", textTransform: "uppercase", color: "#6b4c35", marginBottom: "6px" }}>Category</label>
-            <select style={{ width: "100%", padding: "12px 14px", fontSize: "14px", fontFamily: "'Georgia', serif", border: "1.5px solid #d9c9b0", borderRadius: "10px", background: "#fff", color: "#2c1a0e", outline: "none" }}
-              value={currentProduct.categoryId || ""} onChange={e => setCurrentProduct({ ...currentProduct, categoryId: e.target.value || null })}>
-              <option value="">No category</option>
-              {categories.map(c => <option key={c.id} value={c.id}>{c.icon} {c.name}</option>)}
-            </select>
-          </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-            <label style={{ display: "inline-block", padding: "9px 18px", fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", background: "#fdefd8", color: "#7c4a1e", border: "1px dashed #a0622a", borderRadius: "8px", cursor: "pointer" }}>
-              Upload image
-              <input type="file" accept="image/*" onChange={e => setSelectedFile(e.target.files[0])} style={{ display: "none" }} />
-            </label>
-            {selectedFile && <span style={{ fontSize: "12px", fontFamily: "'Trebuchet MS', sans-serif", color: "#6b4c35" }}>{selectedFile.name}</span>}
-          </div>
-        </DialogContent>
-        <DialogActions style={{ padding: "16px 24px" }}>
-          <Button onClick={() => setOpen(false)} style={{ fontFamily: "'Trebuchet MS', sans-serif", color: "#6b4c35", textTransform: "none" }}>Cancel</Button>
-          <Button onClick={handleSave} variant="contained" style={{ background: "#7c4a1e", fontFamily: "'Trebuchet MS', sans-serif", textTransform: "none", borderRadius: "10px", padding: "8px 24px" }}>
-            {editMode ? "Update" : "Add product"}
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </div>
+      {toast}
+    </>
   );
-};
-
-const st = {
-  page: { minHeight: "100vh", background: "#fdf8f2", fontFamily: "'Georgia', serif" },
-  navbar: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 40px", background: "#fff", borderBottom: "1px solid #e8d9c6", position: "sticky", top: 0, zIndex: 100, flexWrap: "wrap", gap: "10px" },
-  navBrand: { display: "flex", alignItems: "baseline", gap: "10px" },
-  navLogoMark: { color: "#a0622a", fontSize: "18px" },
-  navTitle: { fontSize: "20px", fontWeight: "400", color: "#2c1a0e" },
-  navSubtitle: { fontSize: "12px", fontFamily: "'Trebuchet MS', sans-serif", letterSpacing: "2px", textTransform: "uppercase", color: "#a08060" },
-  navRight: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" },
-  navUser: { fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", color: "#6b4c35" },
-  cartBtn: { fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", background: "#fdefd8", color: "#7c4a1e", border: "1px solid #d9c9b0", borderRadius: "8px", padding: "7px 14px", cursor: "pointer", display: "flex", alignItems: "center", gap: "6px" },
-  cartBadge: { background: "#7c4a1e", color: "#fff", fontSize: "11px", borderRadius: "10px", padding: "1px 7px" },
-  navBtn2: { fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", background: "transparent", color: "#7c4a1e", border: "1px solid #d9c9b0", borderRadius: "8px", padding: "7px 14px", cursor: "pointer" },
-  logoutBtn: { fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", background: "transparent", color: "#7c4a1e", border: "1px solid #d9c9b0", borderRadius: "8px", padding: "7px 14px", cursor: "pointer" },
-  heroStrip: { background: "linear-gradient(135deg, #5c3310 0%, #7c4a1e 60%, #a0622a 100%)", padding: "48px 40px" },
-  heroInner: { maxWidth: "700px" },
-  heroTitle: { fontSize: "36px", fontWeight: "400", color: "#fff", marginBottom: "12px", lineHeight: "1.2" },
-  heroSub: { fontSize: "16px", color: "#f5d9a8", fontFamily: "'Trebuchet MS', sans-serif" },
-  categoryBar: { display: "flex", gap: "8px", padding: "16px 40px", overflowX: "auto", borderBottom: "1px solid #e8d9c6", background: "#fff", flexWrap: "wrap" },
-  catPill: { padding: "7px 18px", fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", background: "#fdf8f2", color: "#6b4c35", border: "1px solid #d9c9b0", borderRadius: "20px", cursor: "pointer", whiteSpace: "nowrap" },
-  catPillActive: { background: "#7c4a1e", color: "#fff", borderColor: "#7c4a1e" },
-  toolbar: { display: "flex", alignItems: "center", padding: "20px 40px", gap: "12px", flexWrap: "wrap" },
-  searchWrap: { display: "flex", alignItems: "center", background: "#fff", border: "1.5px solid #d9c9b0", borderRadius: "12px", padding: "0 16px", flex: "1", minWidth: "200px", maxWidth: "340px" },
-  searchIcon: { color: "#a08060", fontSize: "20px", marginRight: "8px", fontFamily: "sans-serif" },
-  searchInput: { border: "none", outline: "none", background: "transparent", padding: "10px 0", fontSize: "14px", fontFamily: "'Georgia', serif", color: "#2c1a0e", width: "100%" },
-  priceFilter: { display: "flex", alignItems: "center", gap: "8px" },
-  priceInput: { width: "90px", padding: "10px 12px", fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", border: "1.5px solid #d9c9b0", borderRadius: "10px", background: "#fff", color: "#2c1a0e", outline: "none" },
-  priceSeperator: { color: "#a08060", fontSize: "12px" },
-  toolbarRight: { display: "flex", alignItems: "center", gap: "10px", marginLeft: "auto" },
-  clearBtn: { padding: "8px 14px", fontSize: "12px", fontFamily: "'Trebuchet MS', sans-serif", background: "#fcebeb", color: "#a32d2d", border: "1px solid #f5a5a5", borderRadius: "20px", cursor: "pointer" },
-  countBadge: { fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", color: "#8a6a52", background: "#fdefd8", padding: "6px 14px", borderRadius: "20px" },
-  addBtn: { padding: "10px 20px", fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", background: "#7c4a1e", color: "#fdf8f2", border: "none", borderRadius: "10px", cursor: "pointer" },
-  grid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "24px", padding: "0 40px 60px" },
-  emptyState: { gridColumn: "1 / -1", textAlign: "center", padding: "80px 20px" },
-  card: { background: "#fff", borderRadius: "16px", overflow: "hidden", border: "1px solid #e8d9c6", transition: "transform 0.25s, box-shadow 0.25s" },
-  cardHover: { transform: "translateY(-4px)", boxShadow: "0 12px 36px rgba(124,74,30,0.12)" },
-  imgWrap: { position: "relative", height: "200px", overflow: "hidden" },
-  img: { width: "100%", height: "100%", objectFit: "cover" },
-  catTag: { position: "absolute", top: "10px", left: "10px", background: "rgba(44,26,14,0.7)", color: "#f5d9a8", fontSize: "11px", fontFamily: "'Trebuchet MS', sans-serif", padding: "4px 10px", borderRadius: "12px" },
-  cardBody: { padding: "16px 18px" },
-  artisanBadge: { fontSize: "11px", fontFamily: "'Trebuchet MS', sans-serif", letterSpacing: "1px", color: "#a0622a", textTransform: "uppercase", marginBottom: "6px" },
-  productName: { fontSize: "17px", fontWeight: "400", color: "#2c1a0e", marginBottom: "6px" },
-  productDesc: { fontSize: "13px", color: "#8a6a52", fontFamily: "'Trebuchet MS', sans-serif", lineHeight: "1.6", marginBottom: "14px", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" },
-  cardFooter: { display: "flex", alignItems: "center", justifyContent: "space-between", borderTop: "1px solid #f0e4d0", paddingTop: "12px" },
-  price: { fontSize: "19px", fontWeight: "600", color: "#5c3310" },
-  cardActions: { display: "flex", gap: "6px" },
-  cartAddBtn: { padding: "6px 12px", fontSize: "12px", fontFamily: "'Trebuchet MS', sans-serif", background: "#7c4a1e", color: "#fff", border: "none", borderRadius: "8px", cursor: "pointer", transition: "background 0.2s" },
-  editBtn: { padding: "6px 12px", fontSize: "12px", fontFamily: "'Trebuchet MS', sans-serif", background: "transparent", color: "#7c4a1e", border: "1px solid #d9c9b0", borderRadius: "8px", cursor: "pointer" },
-  deleteBtn: { padding: "6px 12px", fontSize: "12px", fontFamily: "'Trebuchet MS', sans-serif", background: "transparent", color: "#c0392b", border: "1px solid #f5a5a5", borderRadius: "8px", cursor: "pointer" },
 };
 
 export default Products;

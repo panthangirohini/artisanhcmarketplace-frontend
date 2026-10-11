@@ -1,339 +1,345 @@
-import React, { useEffect, useState } from "react";
-import api from "../Api";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import api, { imageSrc } from "../Api";
+import {
+  Alert, Avatar, ConfirmDialog, EmptyState, Icon, Loading, RoleBadge, StatusBadge,
+  errorMessage, fmtDate, fmtPrice, titleCase, useToast,
+} from "./ui";
 
-const STATUS_STYLES = {
-  PENDING:   { bg: "#faeeda", color: "#854f0b" },
-  CONFIRMED: { bg: "#e6f1fb", color: "#185fa5" },
-  SHIPPED:   { bg: "#e1f5ee", color: "#0f6e56" },
-  DELIVERED: { bg: "#eaf3de", color: "#3b6d11" },
-  CANCELLED: { bg: "#fcebeb", color: "#a32d2d" },
-};
+const ORDER_STATUSES = ["PENDING", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"];
+const ROLES = ["CUSTOMER", "ARTISAN", "ADMIN"];
 
-const AdminPanel = ({ user, onBack }) => {
-  const [tab, setTab]         = useState("overview");
-  const [stats, setStats]     = useState(null);
-  const [users, setUsers]     = useState([]);
+const AdminPanel = ({ user }) => {
+  const [tab, setTab] = useState("overview");
+  const [stats, setStats] = useState(null);
+  const [users, setUsers] = useState([]);
   const [products, setProducts] = useState([]);
-  const [orders, setOrders]   = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [categories, setCategories] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch]   = useState("");
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [confirm, setConfirm] = useState(null); // { kind: "user" | "product", item }
+  const [toast, showToast] = useToast();
 
-  useEffect(() => { fetchAll(); }, []);
-
-  const fetchAll = async () => {
-    setLoading(true);
+  const fetchAll = useCallback(async () => {
     try {
-      const [statsRes, usersRes, productsRes, ordersRes] = await Promise.all([
+      const [statsRes, usersRes, productsRes, ordersRes, catRes] = await Promise.all([
         api.get("/api/admin/stats"),
         api.get("/api/admin/users"),
         api.get("/api/admin/products"),
         api.get("/api/admin/orders"),
+        api.get("/api/categories"),
       ]);
       setStats(statsRes.data);
       setUsers(usersRes.data);
       setProducts(productsRes.data);
-      setOrders(ordersRes.data);
-    } catch (err) { console.error(err); }
-    finally { setLoading(false); }
-  };
+      setOrders([...ordersRes.data].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+      setCategories(catRes.data);
+      setError("");
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't load admin data."));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  const deleteUser = async (id) => {
-    if (!window.confirm("Delete this user?")) return;
-    await api.delete(`/api/admin/users/${id}`);
-    setUsers(prev => prev.filter(u => u.id !== id));
-  };
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  const userById = useMemo(() => Object.fromEntries(users.map((u) => [u.id, u])), [users]);
+  const catById = useMemo(() => Object.fromEntries(categories.map((c) => [c.id, c])), [categories]);
+
+  const q = search.trim().toLowerCase();
+  const filteredUsers = users.filter((u) => !q || u.name?.toLowerCase().includes(q) || u.email?.toLowerCase().includes(q));
+  const filteredProducts = products.filter((p) => !q || p.name?.toLowerCase().includes(q) || p.artisanName?.toLowerCase().includes(q));
+  const filteredOrders = orders.filter((o) => !q || String(o.id).includes(q) || userById[o.userId]?.name?.toLowerCase().includes(q));
 
   const updateUserRole = async (id, role) => {
-    await api.put(`/api/admin/users/${id}/role?role=${role}`);
-    setUsers(prev => prev.map(u => u.id === id ? { ...u, role } : u));
-  };
-
-  const deleteProduct = async (id) => {
-    if (!window.confirm("Delete this product?")) return;
-    await api.delete(`/api/admin/products/${id}`);
-    setProducts(prev => prev.filter(p => p.id !== id));
-    fetchAll(); // refresh stats
+    try {
+      await api.put(`/api/admin/users/${id}/role`, null, { params: { role } });
+      setUsers((prev) => prev.map((u) => (u.id === id ? { ...u, role } : u)));
+      showToast(`Role changed to ${titleCase(role)}`);
+    } catch (err) {
+      showToast(errorMessage(err, "Couldn't change the role."), { error: true });
+    }
   };
 
   const updateOrderStatus = async (id, status) => {
-    await api.put(`/api/admin/orders/${id}/status?status=${status}`);
-    setOrders(prev => prev.map(o => o.id === id ? { ...o, status } : o));
+    try {
+      await api.put(`/api/admin/orders/${id}/status`, null, { params: { status } });
+      setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, status } : o)));
+      showToast(`Order #${id} marked ${titleCase(status).toLowerCase()}`);
+    } catch (err) {
+      showToast(errorMessage(err, "Couldn't update the order."), { error: true });
+    }
   };
 
-  const fmtPrice = n => "₹" + Number(n).toLocaleString("en-IN");
-  const fmtDate  = d => new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+  const handleDelete = async () => {
+    const { kind, item } = confirm;
+    try {
+      await api.delete(`/api/admin/${kind === "user" ? "users" : "products"}/${item.id}`);
+      showToast(kind === "user" ? "User deleted" : "Product deleted");
+      fetchAll();
+    } catch (err) {
+      showToast(errorMessage(err, "Couldn't delete."), { error: true });
+    }
+    setConfirm(null);
+  };
 
-  const filteredUsers    = users.filter(u => u.name?.toLowerCase().includes(search.toLowerCase()) || u.email?.toLowerCase().includes(search.toLowerCase()));
-  const filteredProducts = products.filter(p => p.name?.toLowerCase().includes(search.toLowerCase()));
-  const filteredOrders   = orders.filter(o => String(o.id).includes(search));
+  const TABS = [
+    { id: "overview", label: "Overview" },
+    { id: "users", label: "Users", count: users.length },
+    { id: "products", label: "Products", count: products.length },
+    { id: "orders", label: "Orders", count: orders.length },
+  ];
+
+  const statCards = stats ? [
+    { label: "Revenue", value: fmtPrice(stats.totalRevenue), foot: "confirmed, shipped & delivered", icon: "rupee", tone: "green" },
+    { label: "Orders", value: stats.totalOrders, foot: `${orders.filter((o) => o.status === "PENDING").length} pending`, icon: "package", tone: "blue" },
+    { label: "Products", value: stats.totalProducts, foot: `${categories.length} categories`, icon: "vase", tone: "brand" },
+    { label: "Users", value: stats.totalUsers, foot: `${stats.totalArtisans} artisans`, icon: "users", tone: "amber" },
+  ] : [];
+
+  const renderOrdersTable = (rows, editable) => (
+    <div className="table-wrap">
+      <table className="table">
+        <thead>
+          <tr><th>Order</th><th>Customer</th><th>Items</th><th className="text-right">Total</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((o) => {
+            const customer = userById[o.userId];
+            return (
+              <tr key={o.id}>
+                <td>
+                  <div className="cell-title">#{o.id}</div>
+                  <div className="cell-sub">{fmtDate(o.createdAt)}</div>
+                </td>
+                <td>
+                  <div className="cell-title">{customer?.name || `User ${o.userId ?? "—"}`}</div>
+                  <div className="cell-sub" title={o.shippingAddress}>{o.shippingAddress || customer?.email}</div>
+                </td>
+                <td>
+                  <div className="cell-sub" style={{ color: "var(--ink-2)" }}>
+                    {(o.items || []).map((i) => `${i.productName} × ${i.quantity}`).join(", ") || "—"}
+                  </div>
+                </td>
+                <td className="text-right nowrap"><strong>{fmtPrice(o.totalAmount)}</strong></td>
+                <td>
+                  {editable ? (
+                    <select className="input input-sm" style={{ width: 140 }} value={o.status}
+                      onChange={(e) => updateOrderStatus(o.id, e.target.value)} aria-label={`Status for order ${o.id}`}>
+                      {ORDER_STATUSES.map((s) => <option key={s} value={s}>{titleCase(s)}</option>)}
+                    </select>
+                  ) : <StatusBadge status={o.status} />}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  const searchBox = (placeholder) => (
+    <div className="search-box input-icon">
+      <Icon name="search" />
+      <input className="input" type="search" placeholder={placeholder} value={search} onChange={(e) => setSearch(e.target.value)} />
+    </div>
+  );
 
   return (
-    <div style={s.page}>
-      {/* Sidebar */}
-      <aside style={s.sidebar}>
-        <div style={s.sidebarTop}>
-          <div style={s.logoMark}>⬡</div>
-          <div style={s.brandName}>Admin<br />Panel</div>
+    <div className="container page">
+      <div className="dash-hero dash-hero-admin">
+        <div className="dash-hero-inner">
+          <div>
+            <span className="eyebrow">Admin console</span>
+            <h1>Marketplace overview</h1>
+            <p>Manage people, products and orders across Artisan Handcraft.</p>
+          </div>
+          <button className="btn btn-light" onClick={() => { setLoading(true); fetchAll(); }}>
+            <Icon name="refresh" size={16} /> Refresh
+          </button>
         </div>
-        <div style={s.adminCard}>
-          <div style={s.avatar}>{(user.name || "A").charAt(0).toUpperCase()}</div>
-          <div style={s.adminName}>{user.name}</div>
-          <div style={s.adminRole}>Administrator</div>
-        </div>
-        <nav style={s.nav}>
-          {[
-            { id: "overview", label: "Overview",  icon: "◈" },
-            { id: "users",    label: "Users",     icon: "◉" },
-            { id: "products", label: "Products",  icon: "◎" },
-            { id: "orders",   label: "Orders",    icon: "◇" },
-          ].map(item => (
-            <button key={item.id}
-              style={tab === item.id ? { ...s.navBtn, ...s.navBtnActive } : s.navBtn}
-              onClick={() => { setTab(item.id); setSearch(""); }}>
-              <span style={s.navIcon}>{item.icon}</span>{item.label}
-            </button>
-          ))}
-        </nav>
-        <button style={s.backBtn} onClick={onBack}>← Back to marketplace</button>
-      </aside>
+      </div>
 
-      {/* Main */}
-      <main style={s.main}>
-        {loading ? (
-          <div style={s.loadingWrap}><p style={s.loadingText}>Loading admin data...</p></div>
-        ) : (
-          <>
-            {/* ── OVERVIEW ── */}
-            {tab === "overview" && stats && (
-              <div style={s.section}>
-                <div style={s.sectionHeader}>
-                  <div><h2 style={s.sectionTitle}>Overview</h2><p style={s.sectionSub}>Platform at a glance</p></div>
-                </div>
-                <div style={s.statsGrid}>
-                  {[
-                    { label: "Total users",    value: stats.totalUsers,    highlight: false },
-                    { label: "Artisans",        value: stats.totalArtisans, highlight: false },
-                    { label: "Products",        value: stats.totalProducts, highlight: false },
-                    { label: "Total orders",    value: stats.totalOrders,   highlight: false },
-                    { label: "Total revenue",   value: fmtPrice(stats.totalRevenue), highlight: true },
-                  ].map(card => (
-                    <div key={card.label} style={card.highlight ? { ...s.statCard, ...s.statHighlight } : s.statCard}>
-                      <div style={s.statLabel}>{card.label}</div>
-                      <div style={{ ...s.statValue, color: card.highlight ? "#5c3310" : "#2c1a0e" }}>{card.value}</div>
-                    </div>
-                  ))}
-                </div>
+      <div className="tabs" role="tablist">
+        {TABS.map((t) => (
+          <button key={t.id} role="tab" aria-selected={tab === t.id} className={"tab" + (tab === t.id ? " active" : "")}
+            onClick={() => { setTab(t.id); setSearch(""); }}>
+            {t.label}{t.count !== undefined && <span className="tab-count">{t.count}</span>}
+          </button>
+        ))}
+      </div>
 
-                {/* Recent orders */}
-                <div style={s.card}>
-                  <div style={s.cardHeader}><h3 style={s.cardTitle}>Recent orders</h3><button style={s.linkBtn} onClick={() => setTab("orders")}>View all →</button></div>
-                  {orders.slice(0, 6).map(o => (
-                    <div key={o.id} style={s.tableRow}>
-                      <span style={s.tableCell}>#{o.id}</span>
-                      <span style={s.tableCell}>{fmtDate(o.createdAt)}</span>
-                      <span style={s.tableCell}>{fmtPrice(o.totalAmount)}</span>
-                      <span style={{ ...s.statusBadge, ...STATUS_STYLES[o.status] }}>{o.status}</span>
-                    </div>
-                  ))}
-                </div>
+      {error && <Alert>{error}</Alert>}
 
-                {/* Recent users */}
-                <div style={s.card}>
-                  <div style={s.cardHeader}><h3 style={s.cardTitle}>Recent users</h3><button style={s.linkBtn} onClick={() => setTab("users")}>View all →</button></div>
-                  {users.slice(0, 6).map(u => (
-                    <div key={u.id} style={s.tableRow}>
-                      <div style={s.userAvatar}>{(u.name || "?").charAt(0).toUpperCase()}</div>
-                      <span style={{ ...s.tableCell, flex: 2 }}>{u.name}</span>
-                      <span style={{ ...s.tableCell, flex: 3 }}>{u.email}</span>
-                      <span style={{ ...s.roleBadge, ...(u.role === "ARTISAN" ? s.roleArtisan : u.role === "ADMIN" ? s.roleAdmin : s.roleCustomer) }}>{u.role}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* ── USERS ── */}
-            {tab === "users" && (
-              <div style={s.section}>
-                <div style={s.sectionHeader}>
-                  <div><h2 style={s.sectionTitle}>Users</h2><p style={s.sectionSub}>{users.length} registered</p></div>
-                </div>
-                <input style={s.searchInput} placeholder="Search by name or email..." value={search} onChange={e => setSearch(e.target.value)} />
-                <div style={s.tableHead}>
-                  <span style={{ flex: 2 }}>Name</span><span style={{ flex: 3 }}>Email</span>
-                  <span style={{ flex: 1 }}>Role</span><span style={{ flex: 2 }}>Actions</span>
-                </div>
-                {filteredUsers.map(u => (
-                  <div key={u.id} style={s.tableRow}>
-                    <div style={{ flex: 2, display: "flex", alignItems: "center", gap: "10px" }}>
-                      <div style={s.userAvatar}>{(u.name || "?").charAt(0).toUpperCase()}</div>
-                      <span style={s.tableText}>{u.name}</span>
-                    </div>
-                    <span style={{ flex: 3, ...s.tableText, color: "#6b4c35" }}>{u.email}</span>
-                    <div style={{ flex: 1 }}>
-                      <span style={{ ...s.roleBadge, ...(u.role === "ARTISAN" ? s.roleArtisan : u.role === "ADMIN" ? s.roleAdmin : s.roleCustomer) }}>{u.role}</span>
-                    </div>
-                    <div style={{ flex: 2, display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                      {u.role !== "ADMIN" && (
-                        <select style={s.roleSelect} value={u.role} onChange={e => updateUserRole(u.id, e.target.value)}>
-                          <option value="CUSTOMER">Customer</option>
-                          <option value="ARTISAN">Artisan</option>
-                          <option value="ADMIN">Admin</option>
-                        </select>
-                      )}
-                      {u.id !== user.id && (
-                        <button style={s.deleteBtn} onClick={() => deleteUser(u.id)}>Delete</button>
-                      )}
-                    </div>
+      {loading ? <Loading label="Loading admin data…" /> : (
+        <>
+          {/* ── OVERVIEW ── */}
+          {tab === "overview" && (
+            <>
+              <div className="stat-grid">
+                {statCards.map((c) => (
+                  <div key={c.label} className="card stat-card">
+                    <span className={`stat-icon ${c.tone}`}><Icon name={c.icon} size={20} /></span>
+                    <span className="stat-label">{c.label}</span>
+                    <span className="stat-value">{c.value}</span>
+                    <span className="stat-foot">{c.foot}</span>
                   </div>
                 ))}
               </div>
-            )}
 
-            {/* ── PRODUCTS ── */}
-            {tab === "products" && (
-              <div style={s.section}>
-                <div style={s.sectionHeader}>
-                  <div><h2 style={s.sectionTitle}>Products</h2><p style={s.sectionSub}>{products.length} listed</p></div>
-                </div>
-                <input style={s.searchInput} placeholder="Search by product name..." value={search} onChange={e => setSearch(e.target.value)} />
-                <div style={s.productsGrid}>
-                  {filteredProducts.map(p => (
-                    <div key={p.id} style={s.productCard}>
-                      <img src={p.imageUrl ? `http://localhost:8080/uploads/${p.imageUrl}` : "https://via.placeholder.com/280x160/f5ead8/a0622a?text=✦"} alt={p.name} style={s.productImg} />
-                      <div style={s.productBody}>
-                        <div style={s.productName}>{p.name}</div>
-                        <div style={s.productArtisan}>by {p.artisanName}</div>
-                        <div style={s.productFooter}>
-                          <span style={s.productPrice}>{fmtPrice(p.price)}</span>
-                          <button style={s.deleteBtn} onClick={() => deleteProduct(p.id)}>Delete</button>
+              <div className="split">
+                <div className="card">
+                  <div className="card-header">
+                    <h3 className="card-title">Latest orders</h3>
+                    {orders.length > 0 && <button className="link" onClick={() => setTab("orders")}>Manage orders</button>}
+                  </div>
+                  {orders.length === 0
+                    ? <EmptyState icon="package" title="No orders yet" />
+                    : orders.slice(0, 6).map((o) => (
+                      <div key={o.id} className="list-row">
+                        <div className="list-row-main">
+                          <div className="cell-title">#{o.id} · {userById[o.userId]?.name || "Customer"}</div>
+                          <div className="cell-sub">{fmtDate(o.createdAt)}</div>
                         </div>
+                        <StatusBadge status={o.status} />
+                        <span className="order-amount nowrap">{fmtPrice(o.totalAmount)}</span>
                       </div>
+                    ))}
+                </div>
+
+                <div className="card">
+                  <div className="card-header">
+                    <h3 className="card-title">Newest members</h3>
+                    <button className="link" onClick={() => setTab("users")}>All users</button>
+                  </div>
+                  {[...users].reverse().slice(0, 6).map((u) => (
+                    <div key={u.id} className="list-row">
+                      <Avatar name={u.name} />
+                      <div className="list-row-main">
+                        <div className="cell-title">{u.name}</div>
+                        <div className="cell-sub">{u.email}</div>
+                      </div>
+                      <RoleBadge role={u.role} />
                     </div>
                   ))}
                 </div>
               </div>
-            )}
+            </>
+          )}
 
-            {/* ── ORDERS ── */}
-            {tab === "orders" && (
-              <div style={s.section}>
-                <div style={s.sectionHeader}>
-                  <div><h2 style={s.sectionTitle}>Orders</h2><p style={s.sectionSub}>{orders.length} total</p></div>
-                </div>
-                <input style={s.searchInput} placeholder="Search by order ID..." value={search} onChange={e => setSearch(e.target.value)} />
-                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                  {filteredOrders.map(o => (
-                    <div key={o.id} style={s.orderCard}>
-                      <div style={s.orderTop}>
-                        <div>
-                          <div style={s.orderId}>Order #{o.id}</div>
-                          <div style={s.orderDate}>{fmtDate(o.createdAt)}</div>
-                          {o.shippingAddress && <div style={s.orderAddress}>📍 {o.shippingAddress}</div>}
-                        </div>
-                        <div style={{ textAlign: "right" }}>
-                          <div style={s.orderAmount}>{fmtPrice(o.totalAmount)}</div>
-                          <span style={{ ...s.statusBadge, ...STATUS_STYLES[o.status] }}>{o.status}</span>
-                          {o.paymentId && <div style={s.paymentId}>Payment: {o.paymentId.slice(0, 16)}...</div>}
-                        </div>
-                      </div>
-                      {o.items && o.items.length > 0 && (
-                        <div style={s.orderItems}>
-                          {o.items.map((item, i) => (
-                            <div key={i} style={s.orderItemRow}>
-                              <span>{item.productName} × {item.quantity}</span>
-                              <span style={{ color: "#5c3310" }}>{fmtPrice(item.price * item.quantity)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      <div style={s.orderActions}>
-                        <span style={s.actionLabel}>Update:</span>
-                        {["CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"].map(st => (
-                          <button key={st}
-                            disabled={o.status === st}
-                            style={o.status === st ? { ...s.statusBtn, opacity: 0.4 } : s.statusBtn}
-                            onClick={() => updateOrderStatus(o.id, st)}>
-                            {st.charAt(0) + st.slice(1).toLowerCase()}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+          {/* ── USERS ── */}
+          {tab === "users" && (
+            <>
+              <div className="toolbar">{searchBox("Search by name or email…")}</div>
+              <div className="card">
+                {filteredUsers.length === 0 ? <EmptyState icon="users" title="No users found" /> : (
+                  <div className="table-wrap">
+                    <table className="table">
+                      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th /></tr></thead>
+                      <tbody>
+                        {filteredUsers.map((u) => {
+                          const isSelf = u.id === user.id;
+                          return (
+                            <tr key={u.id}>
+                              <td>
+                                <div className="cell-user">
+                                  <Avatar name={u.name} />
+                                  <span className="cell-title">{u.name}{isSelf && <span className="muted" style={{ fontWeight: 400 }}> (you)</span>}</span>
+                                </div>
+                              </td>
+                              <td className="muted">{u.email}</td>
+                              <td>
+                                {isSelf ? <RoleBadge role={u.role} /> : (
+                                  <select className="input input-sm" style={{ width: 130 }} value={u.role}
+                                    onChange={(e) => updateUserRole(u.id, e.target.value)} aria-label={`Role for ${u.name}`}>
+                                    {ROLES.map((r) => <option key={r} value={r}>{titleCase(r)}</option>)}
+                                  </select>
+                                )}
+                              </td>
+                              <td>
+                                <div className="cell-actions">
+                                  {!isSelf && (
+                                    <button className="icon-btn icon-btn-sm icon-btn-danger" onClick={() => setConfirm({ kind: "user", item: u })}
+                                      aria-label={`Delete ${u.name}`}><Icon name="trash" size={16} /></button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
-            )}
-          </>
-        )}
-      </main>
+            </>
+          )}
+
+          {/* ── PRODUCTS ── */}
+          {tab === "products" && (
+            <>
+              <div className="toolbar">{searchBox("Search by product or artisan…")}</div>
+              <div className="card">
+                {filteredProducts.length === 0 ? <EmptyState icon="vase" title="No products found" /> : (
+                  <div className="table-wrap">
+                    <table className="table">
+                      <thead><tr><th>Product</th><th>Artisan</th><th>Category</th><th className="text-right">Price</th><th /></tr></thead>
+                      <tbody>
+                        {filteredProducts.map((p) => {
+                          const cat = catById[p.categoryId];
+                          return (
+                            <tr key={p.id}>
+                              <td>
+                                <div className="cell-user">
+                                  <img className="cell-thumb" src={imageSrc(p.imageUrl, cat?.icon)} alt="" />
+                                  <span className="cell-title">{p.name}</span>
+                                </div>
+                              </td>
+                              <td>{p.artisanName}</td>
+                              <td className="nowrap">{cat ? `${cat.icon} ${cat.name}` : <span className="muted">—</span>}</td>
+                              <td className="text-right nowrap"><strong>{fmtPrice(p.price)}</strong></td>
+                              <td>
+                                <div className="cell-actions">
+                                  <button className="icon-btn icon-btn-sm icon-btn-danger" onClick={() => setConfirm({ kind: "product", item: p })}
+                                    aria-label={`Delete ${p.name}`}><Icon name="trash" size={16} /></button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* ── ORDERS ── */}
+          {tab === "orders" && (
+            <>
+              <div className="toolbar">{searchBox("Search by order # or customer…")}</div>
+              <div className="card">
+                {filteredOrders.length === 0 ? <EmptyState icon="package" title="No orders found" /> : renderOrdersTable(filteredOrders, true)}
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      <ConfirmDialog
+        open={Boolean(confirm)}
+        title={confirm?.kind === "user" ? "Delete this user?" : "Delete this product?"}
+        message={confirm ? `“${confirm.item.name}” will be permanently removed. This can't be undone.` : ""}
+        onConfirm={handleDelete}
+        onCancel={() => setConfirm(null)}
+      />
+
+      {toast}
     </div>
   );
-};
-
-const s = {
-  page: { display: "flex", minHeight: "100vh", background: "#fdf8f2", fontFamily: "'Georgia', serif" },
-  sidebar: { width: "240px", background: "#1a1410", display: "flex", flexDirection: "column", padding: "32px 20px", flexShrink: 0 },
-  sidebarTop: { marginBottom: "24px" },
-  logoMark: { fontSize: "28px", color: "#f5d9a8", marginBottom: "8px" },
-  brandName: { fontSize: "20px", color: "#fff", lineHeight: "1.2", fontWeight: "400" },
-  adminCard: { background: "rgba(255,255,255,0.07)", borderRadius: "12px", padding: "16px", marginBottom: "24px", textAlign: "center" },
-  avatar: { width: "48px", height: "48px", borderRadius: "50%", background: "#7c4a1e", color: "#fff", fontSize: "20px", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 10px", fontFamily: "'Trebuchet MS', sans-serif" },
-  adminName: { fontSize: "15px", color: "#fff", marginBottom: "4px" },
-  adminRole: { fontSize: "11px", color: "#f5d9a8", fontFamily: "'Trebuchet MS', sans-serif", letterSpacing: "2px", textTransform: "uppercase" },
-  nav: { display: "flex", flexDirection: "column", gap: "4px", flex: 1 },
-  navBtn: { display: "flex", alignItems: "center", gap: "10px", padding: "11px 14px", borderRadius: "8px", border: "none", background: "transparent", color: "rgba(255,255,255,0.55)", fontSize: "14px", fontFamily: "'Trebuchet MS', sans-serif", cursor: "pointer", textAlign: "left" },
-  navBtnActive: { background: "rgba(255,255,255,0.1)", color: "#fff" },
-  navIcon: { fontSize: "14px", width: "20px", textAlign: "center" },
-  backBtn: { background: "transparent", border: "1px solid rgba(255,255,255,0.15)", color: "rgba(255,255,255,0.45)", borderRadius: "8px", padding: "10px", fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", cursor: "pointer", marginTop: "12px" },
-  main: { flex: 1, padding: "40px", overflowY: "auto" },
-  section: { maxWidth: "900px" },
-  sectionHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "24px" },
-  sectionTitle: { fontSize: "28px", fontWeight: "400", color: "#2c1a0e", marginBottom: "4px" },
-  sectionSub: { fontSize: "14px", color: "#8a6a52", fontFamily: "'Trebuchet MS', sans-serif" },
-  statsGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "14px", marginBottom: "24px" },
-  statCard: { background: "#fff", borderRadius: "12px", padding: "18px", border: "1px solid #e8d9c6" },
-  statHighlight: { background: "#fdefd8", border: "1px solid #d9c9b0" },
-  statLabel: { fontSize: "12px", fontFamily: "'Trebuchet MS', sans-serif", textTransform: "uppercase", letterSpacing: "1px", color: "#8a6a52", marginBottom: "8px" },
-  statValue: { fontSize: "28px", fontWeight: "400" },
-  card: { background: "#fff", borderRadius: "14px", padding: "20px", border: "1px solid #e8d9c6", marginBottom: "20px" },
-  cardHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" },
-  cardTitle: { fontSize: "16px", fontWeight: "400", color: "#2c1a0e" },
-  linkBtn: { background: "none", border: "none", color: "#a0622a", fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", cursor: "pointer", padding: 0 },
-  tableHead: { display: "flex", gap: "12px", padding: "8px 12px", fontSize: "11px", fontFamily: "'Trebuchet MS', sans-serif", letterSpacing: "1px", textTransform: "uppercase", color: "#a08060", marginBottom: "4px" },
-  tableRow: { display: "flex", alignItems: "center", gap: "12px", padding: "12px", background: "#fff", borderRadius: "10px", border: "1px solid #e8d9c6", marginBottom: "8px" },
-  tableCell: { flex: 1, fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", color: "#2c1a0e" },
-  tableText: { fontSize: "14px", fontFamily: "'Trebuchet MS', sans-serif", color: "#2c1a0e" },
-  userAvatar: { width: "32px", height: "32px", borderRadius: "50%", background: "#fdefd8", color: "#7c4a1e", fontSize: "13px", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "'Trebuchet MS', sans-serif" },
-  roleBadge: { fontSize: "11px", fontFamily: "'Trebuchet MS', sans-serif", padding: "3px 10px", borderRadius: "12px" },
-  roleCustomer: { background: "#e6f1fb", color: "#185fa5" },
-  roleArtisan:  { background: "#faeeda", color: "#854f0b" },
-  roleAdmin:    { background: "#fcebeb", color: "#a32d2d" },
-  roleSelect: { fontSize: "12px", fontFamily: "'Trebuchet MS', sans-serif", background: "#fff", border: "1px solid #d9c9b0", borderRadius: "6px", padding: "4px 8px", color: "#6b4c35", cursor: "pointer" },
-  statusBadge: { fontSize: "11px", fontFamily: "'Trebuchet MS', sans-serif", padding: "3px 10px", borderRadius: "12px" },
-  deleteBtn: { padding: "5px 12px", fontSize: "12px", fontFamily: "'Trebuchet MS', sans-serif", background: "transparent", color: "#c0392b", border: "1px solid #f5a5a5", borderRadius: "6px", cursor: "pointer" },
-  searchInput: { width: "100%", maxWidth: "360px", padding: "10px 14px", fontSize: "14px", fontFamily: "'Georgia', serif", border: "1.5px solid #d9c9b0", borderRadius: "10px", background: "#fff", color: "#2c1a0e", outline: "none", marginBottom: "16px", boxSizing: "border-box" },
-  productsGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: "16px" },
-  productCard: { background: "#fff", borderRadius: "12px", overflow: "hidden", border: "1px solid #e8d9c6" },
-  productImg: { width: "100%", height: "150px", objectFit: "cover" },
-  productBody: { padding: "14px" },
-  productName: { fontSize: "15px", color: "#2c1a0e", marginBottom: "4px" },
-  productArtisan: { fontSize: "12px", color: "#a0622a", fontFamily: "'Trebuchet MS', sans-serif", marginBottom: "12px" },
-  productFooter: { display: "flex", justifyContent: "space-between", alignItems: "center" },
-  productPrice: { fontSize: "16px", fontWeight: "600", color: "#5c3310" },
-  orderCard: { background: "#fff", borderRadius: "12px", padding: "18px 20px", border: "1px solid #e8d9c6" },
-  orderTop: { display: "flex", justifyContent: "space-between", marginBottom: "12px" },
-  orderId: { fontSize: "16px", color: "#2c1a0e", marginBottom: "3px" },
-  orderDate: { fontSize: "12px", color: "#a08060", fontFamily: "'Trebuchet MS', sans-serif", marginBottom: "4px" },
-  orderAddress: { fontSize: "12px", color: "#6b4c35", fontFamily: "'Trebuchet MS', sans-serif" },
-  orderAmount: { fontSize: "18px", fontWeight: "600", color: "#5c3310", marginBottom: "6px" },
-  paymentId: { fontSize: "11px", color: "#a08060", fontFamily: "monospace", marginTop: "4px" },
-  orderItems: { background: "#fdf8f2", borderRadius: "8px", padding: "10px 14px", marginBottom: "12px" },
-  orderItemRow: { display: "flex", justifyContent: "space-between", fontSize: "13px", fontFamily: "'Trebuchet MS', sans-serif", color: "#6b4c35", padding: "3px 0" },
-  orderActions: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
-  actionLabel: { fontSize: "12px", color: "#a08060", fontFamily: "'Trebuchet MS', sans-serif" },
-  statusBtn: { padding: "5px 12px", fontSize: "12px", fontFamily: "'Trebuchet MS', sans-serif", background: "#fff", color: "#6b4c35", border: "1px solid #d9c9b0", borderRadius: "20px", cursor: "pointer" },
-  loadingWrap: { display: "flex", alignItems: "center", justifyContent: "center", height: "60vh" },
-  loadingText: { fontSize: "14px", color: "#a08060", fontFamily: "'Trebuchet MS', sans-serif" },
 };
 
 export default AdminPanel;
